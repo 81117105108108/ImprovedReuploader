@@ -6,8 +6,12 @@ local Theme = require(".././Theme")
 local ListElement = require("./List/ListElement")
 
 local assets = script.Parent.Parent.Assets
+-- selene: allow(unused_variable)
 local tabAsset = assets.Tab
+
+-- selene: allow(unused_variable)
 local asset = assets.List
+
 
 local function Get(self: List): { string }
     local values = {}

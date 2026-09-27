@@ -45,15 +45,17 @@ func (s *ShardedMap[T]) GetShard(key any) (*Shard[T], bool) {
 	return shard, exists
 }
 
-func (s *ShardedMap[T]) NewShard(key any) *Shard[T] {
+func (s *ShardedMap[T]) GetOrCreateShard(key any) *Shard[T] {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
 	if shard, exists := s.shards[key]; exists {
 		return shard
 	}
-
 	shard := &Shard[T]{data: make(map[any]T)}
 	s.shards[key] = shard
 	return shard
+}
+
+func (s *ShardedMap[T]) NewShard(key any) *Shard[T] {
+	return s.GetOrCreateShard(key)
 }

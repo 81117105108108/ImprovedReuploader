@@ -4,8 +4,12 @@ local Label = {}
 local Theme = require("../Theme")
 
 local assets = script.Parent.Parent.Assets
+-- selene: allow(unused_variable)
 local buttonAsset = assets.Button
+
+-- selene: allow(unused_variable)
 local asset = assets.List
+
 
 local function ChangeText(self: Label, newText: string)
     self.instance.Text = newText

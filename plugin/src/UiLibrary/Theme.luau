@@ -111,40 +111,40 @@ local function getFont(rawThemeFont: { any } | string): Font
 	return Font.fromName(name, weightEnum, styleEnum)
 end
 
+local function normalizeValue(key: string, value: any, studioTheme: StudioTheme): any
+	if type(value) ~= "table" then return value end
+
+	local valueType = type( (value :: { any })[1] )
+	if valueType == "string" then
+		if #value > 2 then error(`{key} could not create a StudioStyleGuide`) end
+
+		local color, modifier = table.unpack(value :: any)
+
+		local colorEnum: Enum.StudioStyleGuideColor? = Enum.StudioStyleGuideColor:FromName(color)
+		if not colorEnum then error(`{key} could not create a StudioStyleGuide`) end
+
+		local modifierEnum: Enum.StudioStyleGuideModifier?
+		if modifier then
+			modifierEnum = Enum.StudioStyleGuideModifier:FromName(modifier :: any)
+			if not modifierEnum then error(`{key} has invalid StudioStyleGuideModifier`) end
+		end
+
+		return studioTheme:GetColor(colorEnum, modifierEnum)
+	elseif valueType == "number" then
+		if #value ~= 3 then error(`{key} needs 3 values to create a Color3`) end
+
+		local R, G, B = table.unpack(value :: any)
+		local success, result = pcall(Color3.fromRGB, R, G, B)
+		if not success then error(`{key} could not create a Color3`) end
+		return result
+	end
+
+	error(`{key} is an invalid type`)
+end
+
 local function normalizeRawTheme(rawTheme: RawTheme, themeId: string): Theme
 	local studioTheme = settings().Studio.Theme :: StudioTheme
 	local theme: { [string]: any } = {}
-
-	local function normalizeValue(key: string, value: any): any
-		if type(value) ~= "table" then return value end
-
-		local valueType = type( (value :: { any })[1] )
-		if valueType == "string" then
-			if #value > 2 then error(`{key} could not create a StudioStyleGuide`) end
-
-			local color, modifier = table.unpack(value :: any)
-
-			local colorEnum: Enum.StudioStyleGuideColor? = Enum.StudioStyleGuideColor:FromName(color)
-			if not colorEnum then error(`{key} could not create a StudioStyleGuide`) end
-
-			local modifierEnum: Enum.StudioStyleGuideModifier?
-			if modifier then
-				modifierEnum = Enum.StudioStyleGuideModifier:FromName(modifier :: any)
-				if not modifierEnum then error(`{key} has invalid StudioStyleGuideModifier`) end
-			end
-
-			return studioTheme:GetColor(colorEnum, modifierEnum)
-		elseif valueType == "number" then
-			if #value ~= 3 then error(`{key} needs 3 values to create a Color3`) end
-
-			local R, G, B = table.unpack(value :: any)
-			local success, result = pcall(Color3.fromRGB, R, G, B)
-			if not success then error(`{key} could not create a Color3`) end
-			return result
-		end
-
-		error(`{key} is an invalid type`)
-	end
 
 	for k, v in DEFAULT_THEME_PARAMETERS do
 		if k == "Font" then
@@ -153,7 +153,7 @@ local function normalizeRawTheme(rawTheme: RawTheme, themeId: string): Theme
 		end
 
 		if rawTheme[k] then
-			theme[k] = normalizeValue(k, rawTheme[k])
+			theme[k] = normalizeValue(k, rawTheme[k], studioTheme)
 			continue
 		end
 
@@ -162,7 +162,7 @@ local function normalizeRawTheme(rawTheme: RawTheme, themeId: string): Theme
 			continue
 		end
 
-		theme[k] = normalizeValue(k, v)
+		theme[k] = normalizeValue(k, v, studioTheme)
 	end
 
 	theme.Id = themeId
@@ -219,7 +219,18 @@ function Theme.set(themeId: string)
 	local theme: RawTheme? = themes[themeId]
 	assert(theme, "theme does not exist")
 
-	currentTheme = normalizeRawTheme(theme, themeId)
+	local success, result = pcall(normalizeRawTheme, theme, themeId)
+	if not success then
+		warn(`Theme {themeId} invalid ({result}), falling back to Studio`)
+		theme = themes["Studio"]
+		assert(theme, "Studio theme missing")
+		currentTheme = normalizeRawTheme(theme, "Studio")
+		plugin:SetSetting("CurrentTheme", "Studio")
+		preloadThemeAssets(currentTheme)
+		return
+	end
+
+	currentTheme = result
 	plugin:SetSetting("CurrentTheme", themeId)
 	preloadThemeAssets(currentTheme)
 end

@@ -1,4 +1,3 @@
-// ts barely works vro, plugin needs sum wokr
 package mesh
 
 import (
@@ -9,6 +8,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/kartFr/Asset-Reuploader/internal/app/assets/pipeline"
+	"github.com/kartFr/Asset-Reuploader/internal/app/config"
 	"github.com/kartFr/Asset-Reuploader/internal/app/assets/shared/assetutils"
 	"github.com/kartFr/Asset-Reuploader/internal/app/assets/shared/clientutils"
 	"github.com/kartFr/Asset-Reuploader/internal/app/assets/shared/uploaderror"
@@ -73,43 +74,39 @@ func Reupload(ctx *context.Context, r *request.Request) {
 			return
 		}
 
-		res := <-uploadQueue.QueueTask(func() (int64, error) {
-			return retry.Do(
-				retry.NewOptions(retry.Tries(3)),
-				func(try int) (int64, error) {
-					pauseController.WaitIfPaused()
-					if try > 1 {
-						uploadQueue.Limiter.Wait()
+		newID, err := pipeline.QueuedDo(uploadQueue, 3, time.Second,
+			func(try int) (int64, error) {
+				pauseController.WaitIfPaused()
+				if try > 1 {
+					uploadQueue.Limiter.Wait()
+				}
+
+				id, err := uploadHandler()
+				if err == nil {
+					return id, nil
+				}
+
+				if err == ide.UploadMeshErrors.ErrNotLoggedIn {
+					clientutils.GetNewCookie(ctx, r, "cookie expired")
+				} else if err == ide.UploadMeshErrors.ErrInappropriateName {
+					assetInfo.Name = fmt.Sprintf("(%s) [Censored]", assetInfo.Name)
+				} else {
+					switch err.(type) {
+					case *net.OpError, *net.DNSError:
+						uploadQueue.Limiter.Decrement()
 					}
+				}
 
-					id, err := uploadHandler()
-					if err == nil {
-						return id, nil
-					}
+				return 0, &retry.ContinueRetry{Err: err}
+			},
+		)
 
-					if err == ide.UploadMeshErrors.ErrNotLoggedIn {
-						clientutils.GetNewCookie(ctx, r, "cookie expired")
-					} else if err == ide.UploadMeshErrors.ErrInappropriateName {
-						assetInfo.Name = fmt.Sprintf("(%s) [Censored]", assetInfo.Name)
-					} else {
-						switch err.(type) {
-						case *net.OpError, *net.DNSError:
-							uploadQueue.Limiter.Decrement()
-						}
-					}
-
-					return 0, &retry.ContinueRetry{Err: err}
-				},
-			)
-		})
-
-		if err := res.Error; err != nil {
+		if err != nil {
 			assetInfo.Name = oldName
 			newUploadError("Failed to upload", assetInfo, err)
 			return
 		}
 
-		newID := res.Result
 		newValue := idsProcessed.Add(1)
 		logger.Success(uploaderror.New(int(newValue), idsToUpload, "", assetInfo, newID))
 		resp.AddItem(response.ResponseItem{
@@ -178,10 +175,20 @@ func Reupload(ctx *context.Context, r *request.Request) {
 		var uploadWG sync.WaitGroup
 		uploadWG.Add(filteredInfoLength)
 		for i, assetInfo := range filteredInfo {
+			if i >= len(assetLocations) {
+				newUploadError("Failed to get asset location for", assetInfo, "missing delivery response")
+				uploadWG.Done()
+				continue
+			}
 			locationInfo := assetLocations[i]
 
 			if errors := locationInfo.Errors; errors != nil {
 				newUploadError("Failed to get asset location for", assetInfo, errors[0].Message)
+				uploadWG.Done()
+				continue
+			}
+			if len(locationInfo.Locations) == 0 {
+				newUploadError("Failed to get asset location for", assetInfo, "no download URL")
 				uploadWG.Done()
 				continue
 			}
@@ -195,16 +202,19 @@ func Reupload(ctx *context.Context, r *request.Request) {
 	var wg sync.WaitGroup
 	tasks := assetutils.GetAssetsInfoInChunks(ctx, r)
 	wg.Add(len(tasks))
+	chunkCap := config.MaxParallelChunks()
+	if chunkCap < 1 {
+		chunkCap = 6
+	}
+	chunkSlots := make(chan struct{}, chunkCap)
 	for i, task := range tasks {
-		batchSize := 50
-		if i == len(tasks)-1 {
-			batchSize = idsToUpload % 50
-			if batchSize == 0 {
-				batchSize = 50
-			}
-		}
+		batchSize := pipeline.CalcBatchSize(idsToUpload, i, len(tasks))
 
-		go batchProcess(&wg, <-task, batchSize)
+		chunkSlots <- struct{}{}
+		go func(taskCh <-chan assetutils.AssetsInfoResult, bs int) {
+			defer func() { <-chunkSlots }()
+			batchProcess(&wg, <-taskCh, bs)
+		}(task, batchSize)
 	}
 	wg.Wait()
 }

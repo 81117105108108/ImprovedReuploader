@@ -2,6 +2,7 @@ package ide
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -15,6 +16,21 @@ import (
 	"github.com/kartFr/Asset-Reuploader/internal/app/config"
 	"github.com/kartFr/Asset-Reuploader/internal/roblox"
 )
+
+// sleepCtx sleeps or returns ctx.Err() if cancelled.
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return ctx.Err()
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
 
 const (
 	createAssetURL   = "https://apis.roblox.com/assets/v1/assets"
@@ -80,6 +96,17 @@ func setAPIKeyHeader(req *http.Request) {
 	if apiKey != "" {
 		req.Header.Set("x-api-key", apiKey)
 	}
+}
+
+// setAuthHeaders sets cookies and CSRF token headers. Used by both executeCreateAsset and pollOperation.
+func setAuthHeaders(c *roblox.Client, req *http.Request) {
+	req.AddCookie(&http.Cookie{
+		Name:  ".ROBLOSECURITY",
+		Value: c.Cookie,
+	})
+	req.Header.Set("x-csrf-token", c.GetToken())
+	req.Header.Set("User-Agent", "RobloxStudio/WinInet")
+	setAPIKeyHeader(req)
 }
 
 type createAssetRequest struct {
@@ -234,18 +261,16 @@ func parseAssetID(op *operationResponse) (int64, error) {
 }
 
 func pollOperation(c *roblox.Client, operationID string) (*operationResponse, error) {
-	req, err := http.NewRequest("GET", operationBaseURL+operationID, http.NoBody)
+	return pollOperationCtx(context.Background(), c, operationID)
+}
+
+func pollOperationCtx(ctx context.Context, c *roblox.Client, operationID string) (*operationResponse, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", operationBaseURL+operationID, http.NoBody)
 	if err != nil {
 		return nil, err
 	}
 
-	req.AddCookie(&http.Cookie{
-		Name:  ".ROBLOSECURITY",
-		Value: c.Cookie,
-	})
-	req.Header.Set("x-csrf-token", c.GetToken())
-	req.Header.Set("User-Agent", "RobloxStudio/WinInet")
-	setAPIKeyHeader(req)
+	setAuthHeaders(c, req)
 
 	resp, err := c.DoRequest(req)
 	if err != nil {
@@ -275,18 +300,69 @@ func pollOperation(c *roblox.Client, operationID string) (*operationResponse, er
 	}
 }
 
+// NewUploadHandler is the shared implementation for mesh/animation uploads.
+// assetType is the Roblox asset type ("Mesh", "Animation"), contentType the
+// multipart content type. Callers keep typed error vars for compat.
+func NewUploadHandler(
+	c *roblox.Client,
+	assetType, contentType, name, description string,
+	data *bytes.Buffer,
+	tokenInvalidErr, notLoggedInErr error,
+	groupID ...int64,
+) (func() (int64, error), error) {
+	var group int64
+	if len(groupID) > 0 {
+		group = groupID[0]
+	}
+	currentName := name
+
+	return func() (int64, error) {
+		creatorID := c.UserInfo.ID
+		isGroup := group > 0
+		if isGroup {
+			creatorID = group
+		}
+		req, err := newCreateAssetRequest(assetType, currentName, description, data, contentType, creatorID, isGroup)
+		if err != nil {
+			return 0, err
+		}
+
+		id, err := executeCreateAsset(c, req, tokenInvalidErr, notLoggedInErr)
+		if err == nil {
+			return id, nil
+		}
+
+		if isInappropriateError(err.Error()) {
+			currentName = "[Censored]"
+			if assetType == "Animation" {
+				return 0, UploadAnimationErrors.ErrInappropriateName
+			}
+			if assetType == "Mesh" {
+				return 0, UploadMeshErrors.ErrInappropriateName
+			}
+		}
+
+		return 0, err
+	}, nil
+}
+
 func executeCreateAsset(
 	c *roblox.Client,
 	req *http.Request,
 	onTokenInvalid error,
 	onNotLoggedIn error,
 ) (int64, error) {
-	req.AddCookie(&http.Cookie{
-		Name:  ".ROBLOSECURITY",
-		Value: c.Cookie,
-	})
-	req.Header.Set("x-csrf-token", c.GetToken())
-	setAPIKeyHeader(req)
+	return executeCreateAssetCtx(context.Background(), c, req, onTokenInvalid, onNotLoggedIn)
+}
+
+func executeCreateAssetCtx(
+	ctx context.Context,
+	c *roblox.Client,
+	req *http.Request,
+	onTokenInvalid error,
+	onNotLoggedIn error,
+) (int64, error) {
+	setAuthHeaders(c, req)
 
 	resp, err := c.DoRequest(req)
 	if err != nil {
@@ -318,16 +394,22 @@ func executeCreateAsset(
 		}
 
 		var poll429Streak int
+		deadline := time.Now().Add(5 * time.Minute)
 		for i := 0; i < maxPollAttempts; i++ {
-			time.Sleep(pollInterval)
-			polled, err := pollOperation(c, operationID)
+			if err := sleepCtx(ctx, pollInterval); err != nil {
+				return 0, err
+			}
+			if time.Now().After(deadline) {
+				return 0, errors.New("asset operation timed out")
+			}
+			polled, err := pollOperationCtx(ctx, c, operationID)
 			if err != nil {
 				if errors.Is(err, errTokenInvalid) {
 					return 0, onTokenInvalid
 				}
 				if errors.Is(err, ErrRateLimited) {
 					poll429Streak++
-					if poll429Streak > 40 {
+					if poll429Streak > maxPollAttempts {
 						return 0, err
 					}
 					wait := 3 * time.Second
@@ -343,8 +425,9 @@ func executeCreateAsset(
 					if wait > 45*time.Second {
 						wait = 45 * time.Second
 					}
-					time.Sleep(wait)
-					i--
+					if err := sleepCtx(ctx, wait); err != nil {
+						return 0, err
+					}
 					continue
 				}
 				return 0, err

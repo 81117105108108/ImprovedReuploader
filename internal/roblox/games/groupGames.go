@@ -10,11 +10,10 @@ import (
 	"github.com/kartFr/Asset-Reuploader/internal/roblox"
 )
 
-func NewGroupGamesHandler(c *roblox.Client, groupID int64) (func() (*GamesResponse, error), error) {
-	url := fmt.Sprintf("https://games.roblox.com/v2/groups/%d/gamesV2?limit=100", groupID)
+func newGamesHandler(c *roblox.Client, url string) (func() (*GamesResponse, error), error) {
 	req, err := http.NewRequest("GET", url, http.NoBody)
 	if err != nil {
-		return func() (*GamesResponse, error) { return nil, nil }, err
+		return nil, err
 	}
 
 	return func() (*GamesResponse, error) {
@@ -34,9 +33,16 @@ func NewGroupGamesHandler(c *roblox.Client, groupID int64) (func() (*GamesRespon
 		}
 
 		var gamesResponse GamesResponse
-		json.NewDecoder(resp.Body).Decode(&gamesResponse)
+		if err := json.NewDecoder(resp.Body).Decode(&gamesResponse); err != nil {
+			return nil, err
+		}
 		return &gamesResponse, nil
 	}, nil
+}
+
+func NewGroupGamesHandler(c *roblox.Client, groupID int64) (func() (*GamesResponse, error), error) {
+	url := fmt.Sprintf("https://games.roblox.com/v2/groups/%d/gamesV2?limit=100", groupID)
+	return newGamesHandler(c, url)
 }
 
 func GroupGames(c *roblox.Client, groupID int64) (*GamesResponse, error) {

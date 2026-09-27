@@ -3,6 +3,7 @@ package context
 import "sync"
 
 type pauseController struct {
+	// IsPaused is guarded by mutex — do not read directly, use IsPausedNow().
 	IsPaused bool
 	mutex    sync.RWMutex
 	signal   chan struct{}
@@ -22,6 +23,13 @@ func (c *pauseController) WaitIfPaused() {
 	signal := c.signal
 	c.mutex.RUnlock()
 	<-signal
+}
+
+// IsPausedNow reports paused state under lock (use instead of reading IsPaused field).
+func (c *pauseController) IsPausedNow() bool {
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	return c.IsPaused
 }
 
 func (c *pauseController) Pause() (success bool) {

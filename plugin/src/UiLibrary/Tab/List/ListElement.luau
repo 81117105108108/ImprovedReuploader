@@ -4,8 +4,12 @@ local ListElement = {}
 local Theme = require("../../Theme")
 
 local assets = script.Parent.Parent.Parent.Assets
+-- selene: allow(unused_variable)
 local asset = assets.ListElement
+
+-- selene: allow(unused_variable)
 local listAsset = assets.List
+
 
 local function OnClicked(self: ListElement, callback: () -> ()): ListElement
     local element = self.instance

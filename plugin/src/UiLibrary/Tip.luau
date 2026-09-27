@@ -4,7 +4,9 @@ local Tip = {}
 local Theme = require("./Theme")
 
 local assets = script.Parent.Assets
+-- selene: allow(unused_variable)
 local tipBarAsset = assets.MainFrame.Tip
+
 
 type TipBarAsset = typeof(tipBarAsset)
 
@@ -28,19 +30,16 @@ export type Tip = {
     Destroy: typeof(Destroy)
 }
 
-local function newTipButton(): ImageButton
-    local button = Instance.new("ImageButton")
-    button.AnchorPoint = Vector2.new(0, 0.5)
-    button.BackgroundTransparency = 1
-    button.Size = UDim2.fromOffset(15, 15)
-    button.ZIndex = 2
-    button.ImageTransparency = 0.5
-
-    return button
-end
-
 function Tip.new(tipBar: TipBarAsset, text: string): Tip
-    local instance = newTipButton()
+    local instance = (function(): ImageButton
+        local button = Instance.new("ImageButton")
+        button.AnchorPoint = Vector2.new(0, 0.5)
+        button.BackgroundTransparency = 1
+        button.Size = UDim2.fromOffset(15, 15)
+        button.ZIndex = 2
+        button.ImageTransparency = 0.5
+        return button
+    end)()
 
     instance.MouseEnter:Connect(function()
         instance.ImageTransparency = 0

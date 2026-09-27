@@ -3,7 +3,9 @@ local Button = {}
 
 local Theme = require("../Theme")
 
+-- selene: allow(unused_variable)
 local asset = script.Parent.Parent.Assets.Button
+
 
 local function ColorSelected(self: Button)
 	local theme = Theme.get()

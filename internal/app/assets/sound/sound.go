@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/kartFr/Asset-Reuploader/internal/app/assets/pipeline"
+	"github.com/kartFr/Asset-Reuploader/internal/app/config"
 	"github.com/kartFr/Asset-Reuploader/internal/app/assets/shared/assetutils"
 	"github.com/kartFr/Asset-Reuploader/internal/app/assets/shared/clientutils"
 	"github.com/kartFr/Asset-Reuploader/internal/app/assets/shared/uploaderror"
@@ -18,7 +20,6 @@ import (
 	"github.com/kartFr/Asset-Reuploader/internal/atomicarray"
 	"github.com/kartFr/Asset-Reuploader/internal/color"
 	"github.com/kartFr/Asset-Reuploader/internal/retry"
-	"github.com/kartFr/Asset-Reuploader/internal/roblox"
 	"github.com/kartFr/Asset-Reuploader/internal/roblox/assetdelivery"
 	"github.com/kartFr/Asset-Reuploader/internal/roblox/assets"
 	"github.com/kartFr/Asset-Reuploader/internal/roblox/develop"
@@ -32,30 +33,6 @@ const assetTypeID int32 = 3
 
 var ErrUnauthorized = errors.New("authentication required to access asset")
 
-func MoveValueToTop[T comparable](arr *atomicarray.AtomicArray[T], value T) {
-	arr.Update(func(currentArray []T) []T {
-		if currentArray[0] == value {
-			return nil
-		}
-
-		for i, v := range currentArray {
-			if v != value {
-				continue
-			}
-			if i == 1 {
-				currentArray[0], currentArray[1] = currentArray[1], currentArray[0]
-				return currentArray
-			}
-
-			copy(currentArray[1:i+1], currentArray[0:i])
-			currentArray[0] = value
-			return currentArray
-		}
-
-		return nil
-	})
-}
-
 func Reupload(ctx *context.Context, r *request.Request) {
 	client := ctx.Client
 	logger := ctx.Logger
@@ -65,7 +42,7 @@ func Reupload(ctx *context.Context, r *request.Request) {
 	idsToUpload := len(r.IDs)
 	var idsProcessed atomic.Int32
 
-	defaultPlaceIDs := r.DefaultPlaceIDs
+	defaultPlaceIDs := append([]int64(nil), r.DefaultPlaceIDs...)
 	defaultPlaceIDsMap := make(map[int64]struct{}, len(defaultPlaceIDs))
 	for _, placeID := range defaultPlaceIDs {
 		defaultPlaceIDsMap[placeID] = struct{}{}
@@ -100,10 +77,6 @@ func Reupload(ctx *context.Context, r *request.Request) {
 	}
 
 	grantPermissions := func(newID int64) (*assets.PermissionResponse, error) {
-		permissionsClient, _ := roblox.NewClient("")
-		permissionsClient.Cookie = client.Cookie
-		permissionsClient.SetToken(client.GetToken())
-
 		permissionHandler, err := assets.NewUpdatePermissionsHandler(client, newID, permissionRequest)
 		if err != nil {
 			return nil, err
@@ -115,7 +88,7 @@ func Reupload(ctx *context.Context, r *request.Request) {
 				func(try int) (*assets.PermissionResponse, error) {
 					pauseController.WaitIfPaused()
 					if try > 1 {
-						uploadQueue.Limiter.Wait()
+						permissionQueue.Limiter.Wait()
 					}
 
 					permissionReponse, err := permissionHandler()
@@ -156,45 +129,41 @@ func Reupload(ctx *context.Context, r *request.Request) {
 			return
 		}
 
-		res := <-uploadQueue.QueueTask(func() (int64, error) {
-			return retry.Do(
-				retry.NewOptions(retry.Tries(3)),
-				func(try int) (int64, error) {
-					pauseController.WaitIfPaused()
-					if try > 1 {
-						uploadQueue.Limiter.Wait()
-					}
+		newID, err := pipeline.QueuedDo(uploadQueue, 3, time.Second,
+			func(try int) (int64, error) {
+				pauseController.WaitIfPaused()
+				if try > 1 {
+					uploadQueue.Limiter.Wait()
+				}
 
-					uploadResponse, err := uploadHandler()
-					if err == nil {
-						return uploadResponse.ID, nil
-					}
+				uploadResponse, err := uploadHandler()
+				if err == nil {
+					return uploadResponse.ID, nil
+				}
 
-					switch err {
-					case publish.UploadAudioErrors.ErrNotAuthenticated:
-						clientutils.GetNewCookie(ctx, r, "cookie expired")
-					case publish.UploadAudioErrors.ErrQuotaExceeded:
-						clientutils.GetNewCookie(ctx, r, "audio limit exceeded")
-					case publish.UploadAudioErrors.ErrModerated:
-						assetInfo.Name = fmt.Sprintf("(%s) [Censored]", assetInfo.Name)
-					default:
-						switch err.(type) {
-						case *net.OpError, *net.DNSError:
-							uploadQueue.Limiter.Decrement()
-						}
+				switch err {
+				case publish.UploadAudioErrors.ErrNotAuthenticated:
+					clientutils.GetNewCookie(ctx, r, "cookie expired")
+				case publish.UploadAudioErrors.ErrQuotaExceeded:
+					clientutils.GetNewCookie(ctx, r, "audio limit exceeded")
+				case publish.UploadAudioErrors.ErrModerated:
+					assetInfo.Name = fmt.Sprintf("(%s) [Censored]", assetInfo.Name)
+				default:
+					switch err.(type) {
+					case *net.OpError, *net.DNSError:
+						uploadQueue.Limiter.Decrement()
 					}
+				}
 
-					return 0, &retry.ContinueRetry{Err: err}
-				},
-			)
-		})
-		if err := res.Error; err != nil {
+				return 0, &retry.ContinueRetry{Err: err}
+			},
+		)
+		if err != nil {
 			assetInfo.Name = oldName
 			newUploadError("Failed to upload", assetInfo, err)
 			return
 		}
 
-		newID := res.Result
 		newValue := idsProcessed.Add(1)
 		logger.Success(uploaderror.New(int(newValue), idsToUpload, "", assetInfo, newID))
 		resp.AddItem(response.ResponseItem{
@@ -204,15 +173,15 @@ func Reupload(ctx *context.Context, r *request.Request) {
 
 		if _, err = grantPermissions(newID); err != nil {
 			message := fmt.Sprintf(">> %s(%d) failed to grant permission: ", assetInfo.Name, newID) + err.Error()
-			if pauseController.IsPaused {
-				color.Error.Fprintln(logger.History, message)
+			if pauseController.IsPausedNow() {
+				logger.Historyf(color.Error, message)
 			} else {
 				logger.Error(message)
 			}
 		} else {
 			message := fmt.Sprintf(">> %s(%d) granted permission", assetInfo.Name, newID)
-			if pauseController.IsPaused {
-				color.Info.Fprintln(logger.History, message)
+			if pauseController.IsPausedNow() {
+				logger.Historyf(color.Info, message)
 			} else {
 				logger.Info(message)
 			}
@@ -220,12 +189,8 @@ func Reupload(ctx *context.Context, r *request.Request) {
 	}
 
 	getCreatorPlaceCache := func(creatorID int64, creatorType string) (*atomicarray.AtomicArray[int64], error) {
-		creatorShard, exists := creatorPlaceMap.GetShard(creatorType)
-		mutexShard, _ := creatorMutexMap.GetShard(creatorType)
-		if !exists {
-			creatorShard = creatorPlaceMap.NewShard(creatorType)
-			mutexShard = creatorMutexMap.NewShard(creatorType)
-		}
+		creatorShard := creatorPlaceMap.GetOrCreateShard(creatorType)
+		mutexShard := creatorMutexMap.GetOrCreateShard(creatorType)
 
 		if cache, cacheExists := creatorShard.Get(creatorID); cacheExists {
 			return cache, nil
@@ -239,6 +204,7 @@ func Reupload(ctx *context.Context, r *request.Request) {
 
 		mutex.Lock()
 		defer mutex.Unlock()
+		defer mutexShard.Remove(creatorID)
 
 		if cache, cacheExists := creatorShard.Get(creatorID); cacheExists {
 			return cache, nil
@@ -269,7 +235,6 @@ func Reupload(ctx *context.Context, r *request.Request) {
 
 		cache := atomicarray.New(&ids)
 		creatorShard.Set(creatorID, cache)
-		mutexShard.Remove(creatorID)
 		return cache, nil
 	}
 
@@ -344,23 +309,18 @@ func Reupload(ctx *context.Context, r *request.Request) {
 				go uploadAsset(&uploadWG, assetInfoMap[assetID], assetLocation.Locations[0].Location)
 			}
 			if hadSuccess {
-				MoveValueToTop(placeCache, placeID)
+				assetutils.MoveValueToTop(placeCache, placeID)
 			}
 			if len(body) == 0 {
 				break
 			}
 		}
 
-		var index int
-		for _, assetLocation := range assetLocations {
-			if len(assetLocation.Locations) != 0 {
-				continue
-			}
-			assetID := body[index].AssetID
-			index++
-
-			assetInfo := assetInfoMap[assetID]
-			newUploadError("Failed to get asset location", assetInfo, assetLocation.Errors[0].Message)
+		// Anything left in body got no URL from any place. Do not index into the last
+		// batch response here: after partial successes, body indices no longer match.
+		for _, req := range body {
+			assetInfo := assetInfoMap[req.AssetID]
+			newUploadError("Failed to get asset location", assetInfo, "no download URL from any place (tried creator places)")
 		}
 
 		uploadWG.Wait()
@@ -391,10 +351,14 @@ func Reupload(ctx *context.Context, r *request.Request) {
 		assetLocations, err := getAssetLocations(body, currentPlaceID)
 		if err != nil {
 			newBatchError(filteredInfoLength, "Failed to get asset locations to see permissions", err)
+			return
 		}
 
 		unownedAssets := make([]*develop.AssetInfo, 0)
 		for i, location := range assetLocations {
+			if i >= len(filteredInfo) {
+				break
+			}
 			if len(location.Locations) > 0 {
 				continue
 			}
@@ -402,28 +366,10 @@ func Reupload(ctx *context.Context, r *request.Request) {
 			unownedAssets = append(unownedAssets, filteredInfo[i])
 		}
 
-		CreatorAssets := make(map[string]map[int64][]*develop.AssetInfo)
-		for _, assetInfo := range unownedAssets {
-			assetCreatorType := assetInfo.Creator.Type
-			assetCreatorID := assetInfo.Creator.TargetID
-
-			creatorType, exists := CreatorAssets[assetCreatorType]
-			if !exists {
-				creatorType = make(map[int64][]*develop.AssetInfo)
-				CreatorAssets[assetCreatorType] = creatorType
-			}
-
-			creatorAssets, exists := creatorType[assetCreatorID]
-			if !exists {
-				creatorAssets = make([]*develop.AssetInfo, 0)
-				creatorType[assetCreatorID] = creatorAssets
-			}
-
-			creatorType[assetCreatorID] = append(creatorAssets, assetInfo)
-		}
+		creatorAssetsByType := pipeline.GroupByCreator(unownedAssets)
 
 		var uploadWG sync.WaitGroup
-		for creatorType, creatorAssetMap := range CreatorAssets {
+		for creatorType, creatorAssetMap := range creatorAssetsByType {
 			uploadWG.Add(len(creatorAssetMap))
 
 			for creatorID, creatorAssets := range creatorAssetMap {
@@ -436,16 +382,19 @@ func Reupload(ctx *context.Context, r *request.Request) {
 	var wg sync.WaitGroup
 	tasks := assetutils.GetAssetsInfoInChunks(ctx, r)
 	wg.Add(len(tasks))
+	chunkCap := config.MaxParallelChunks()
+	if chunkCap < 1 {
+		chunkCap = 6
+	}
+	chunkSlots := make(chan struct{}, chunkCap)
 	for i, task := range tasks {
-		batchSize := 50
-		if i == len(tasks)-1 {
-			batchSize = idsToUpload % 50
-			if batchSize == 0 {
-				batchSize = 50
-			}
-		}
+		batchSize := pipeline.CalcBatchSize(idsToUpload, i, len(tasks))
 
-		go batchProcess(&wg, <-task, batchSize)
+		chunkSlots <- struct{}{}
+		go func(taskCh <-chan assetutils.AssetsInfoResult, bs int) {
+			defer func() { <-chunkSlots }()
+			batchProcess(&wg, <-taskCh, bs)
+		}(task, batchSize)
 	}
 	wg.Wait()
 }

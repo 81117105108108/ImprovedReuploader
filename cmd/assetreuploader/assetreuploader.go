@@ -13,21 +13,16 @@ import (
 	"github.com/kartFr/Asset-Reuploader/internal/roblox"
 )
 
-var (
-	cookieFile = config.Get("cookie_file")
-	port       = config.Get("port")
-)
-
 func main() {
 	console.ClearScreen()
 
 	fmt.Println("Authenticating cookie...")
 
-	cookie, readErr := files.Read(cookieFile)
+	cookie, readErr := files.Read(config.Get("cookie_file"))
 
 	// Parse cookie file (Roblox cookie + optional legacy api-key: line)
-	roblosCookie, legacyAPIKey := parseCookieFile(cookie)
-	roblosCookie = strings.TrimSpace(roblosCookie)
+	robloxCookie, legacyAPIKey := parseCookieFile(cookie)
+	robloxCookie = strings.TrimSpace(robloxCookie)
 	legacyAPIKey = strings.TrimSpace(legacyAPIKey)
 	if legacyAPIKey != "" && strings.TrimSpace(config.Get("api_key")) == "" {
 		config.Set("api_key", legacyAPIKey)
@@ -36,7 +31,7 @@ func main() {
 		}
 	}
 
-	c, clientErr := roblox.NewClient(roblosCookie)
+	c, clientErr := roblox.NewClient(robloxCookie)
 	console.ClearScreen()
 
 	if readErr != nil || clientErr != nil {
@@ -44,7 +39,7 @@ func main() {
 			color.Error.Println(readErr)
 		}
 
-		if clientErr != nil && roblosCookie != "" {
+		if clientErr != nil && robloxCookie != "" {
 			color.Error.Println(clientErr)
 		}
 
@@ -57,31 +52,37 @@ func main() {
 	
 	ensureAPIKey()
 
-	fmt.Println("localhost started on port " + port + ". Waiting to start reuploading.")
+	fmt.Println("localhost started on port " + config.Get("port") + ". Waiting to start reuploading.")
 	if err := serve(c); err != nil {
 		log.Fatal(err)
 	}
 }
 
 // parseCookieFile extracts the Roblox cookie and API key from the cookie file
-func parseCookieFile(content string) (roblosCookie, apiKey string) {
+func parseCookieFile(content string) (robloxCookie, apiKey string) {
 	lines := strings.Split(strings.TrimSpace(content), "\n")
 	for _, line := range lines {
-		line = strings.TrimSpace(line)
+		line = strings.TrimSpace(strings.TrimSuffix(line, "\r"))
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
 		if strings.HasPrefix(line, "api-key:") {
-			apiKey = strings.TrimPrefix(line, "api-key:")
-			apiKey = strings.TrimSpace(apiKey)
-		} else if line != "" && !strings.HasPrefix(line, "api-key:") {
-			// The first non-empty line that isn't an API key is the Roblox cookie
-			roblosCookie = line
+			if apiKey == "" {
+				apiKey = strings.TrimSpace(strings.TrimPrefix(line, "api-key:"))
+			}
+			continue
+		}
+		// The first non-empty line that isn't an API key is the Roblox cookie
+		if robloxCookie == "" {
+			robloxCookie = line
 		}
 	}
-	return roblosCookie, apiKey
+	return robloxCookie, apiKey
 }
 
 // saveCookieFile saves the Roblox cookie to cookie.txt (API key lives in api-key.txt).
-func saveCookieFile(roblosCookie string) error {
-	return files.Write(cookieFile, strings.TrimSpace(roblosCookie)+"\n")
+func saveCookieFile(robloxCookie string) error {
+	return files.Write(config.Get("cookie_file"), strings.TrimSpace(robloxCookie)+"\n")
 }
 
 func getCookie(c *roblox.Client) {

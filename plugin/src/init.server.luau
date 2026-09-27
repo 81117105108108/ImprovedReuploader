@@ -8,9 +8,6 @@ if not RunService:IsEdit() then
 	return
 end
 
-local currentVersion = script.Parent.Version.Value
-local topbarTitle = "Bacfr Asset Reuploader 1.7.2"
-
 local toolbar = plugin:CreateToolbar("Asset Reuploader")
 local widget = plugin:CreateDockWidgetPluginGui(
 	"Asset Reuploader",

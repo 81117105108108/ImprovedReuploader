@@ -3,6 +3,7 @@ package clientutils
 import (
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/kartFr/Asset-Reuploader/internal/app/assets/shared/permissions"
 	"github.com/kartFr/Asset-Reuploader/internal/app/config"
@@ -13,9 +14,44 @@ import (
 	"github.com/kartFr/Asset-Reuploader/internal/files"
 )
 
-var cookieFile = config.Get("cookie_file")
+var (
+	cookieMu       sync.Mutex
+	cookieInFlight bool
+	cookieWaiters  []chan struct{}
+)
+
+func waitForCookieRefresh() bool {
+	cookieMu.Lock()
+	if !cookieInFlight {
+		cookieInFlight = true
+		cookieMu.Unlock()
+		return true // caller is leader
+	}
+	ch := make(chan struct{})
+	cookieWaiters = append(cookieWaiters, ch)
+	cookieMu.Unlock()
+	<-ch
+	return false // follower: cookie already refreshed
+}
+
+func finishCookieRefresh() {
+	cookieMu.Lock()
+	cookieInFlight = false
+	waiters := cookieWaiters
+	cookieWaiters = nil
+	cookieMu.Unlock()
+	for _, ch := range waiters {
+		close(ch)
+	}
+}
 
 func GetNewCookie(ctx *context.Context, r *request.Request, m string) {
+	if !waitForCookieRefresh() {
+		ctx.PauseController.WaitIfPaused()
+		return
+	}
+	defer finishCookieRefresh()
+
 	pauseController := ctx.PauseController
 
 	if !pauseController.Pause() {
@@ -28,7 +64,7 @@ func GetNewCookie(ctx *context.Context, r *request.Request, m string) {
 	client := ctx.Client
 	inputErr := errors.New(m)
 	for {
-		fmt.Print(ctx.Logger.History.String())
+		fmt.Print(ctx.Logger.HistoryString())
 		color.Error.Println(inputErr)
 
 		i, err := console.LongInput("ROBLOSECURITY: ")
@@ -57,9 +93,9 @@ func GetNewCookie(ctx *context.Context, r *request.Request, m string) {
 		break
 	}
 
-	fmt.Print(ctx.Logger.History.String())
+	fmt.Print(ctx.Logger.HistoryString())
 
-	if err := files.Write(cookieFile, client.Cookie); err != nil {
+	if err := files.Write(config.Get("cookie_file"), client.Cookie); err != nil {
 		ctx.Logger.Error("Failed to save cookie: ", err)
 	}
 

@@ -1,5 +1,6 @@
 --!strict
 local UiLibrary = require("../../UiLibrary")
+local GetPlaceList = require("../GetPlaceList")
 
 local MarketplaceService = game:GetService("MarketplaceService")
 
@@ -7,14 +8,14 @@ return function(ui: UiLibrary.Ui, plugin: Plugin)
 	local tab = ui:CreateTab("Filter")
         local placeList
 
-    _G.getPlaceList = function(): { number } -- guys im so sorry im just so drained :sob: will be back at full on v2.0.0, forgive me for _G use... I wont forgive myself
+    GetPlaceList.set(function(): { number }
         local placesListValues = placeList:Get()
         local list = table.create(#placesListValues)
         for _, value in placesListValues do
             table.insert(list, tonumber(value))
         end
         return list :: { number }
-    end
+    end)
 	
 	local split1 = tab:CreateSplit()
     split1:CreateToggle("Search string values", function(state)

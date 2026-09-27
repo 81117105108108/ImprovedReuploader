@@ -23,13 +23,16 @@ func (s *AtomicArray[T]) Store(newSlice []T) {
 func (s *AtomicArray[T]) Update(updateFunc func(arr []T) []T) {
 	for {
 		arr := s.arr.Load()
-
-		res := updateFunc(*arr)
-		if res == nil {
+		cur := *arr
+		if len(cur) == 0 {
 			return
 		}
-
-		if s.arr.CompareAndSwap(arr, &res) {
+		out := updateFunc(cur)
+		if out == nil {
+			return
+		}
+		cloned := append([]T(nil), out...)
+		if s.arr.CompareAndSwap(arr, &cloned) {
 			return
 		}
 	}

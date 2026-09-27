@@ -5,8 +5,11 @@ local Tab = require("./UiLibrary/Tab")
 local Theme = require("./UiLibrary/Theme")
 local Tip = require("./UiLibrary/Tip")
 
+-- selene: allow(unused_variable)
 local asset = script.Assets.MainFrame
-local TOPBAR_TITLE = "Bacfr Asset Reuploader 1.7.2"
+
+local VERSION = "1.7.2"
+local TOPBAR_TITLE = "Bacfr Asset Reuploader " .. VERSION -- keep in sync with default.project.json
 
 type ThemeManager = typeof(Theme)
 
@@ -62,11 +65,16 @@ local function Notify(self: Ui, title: string, description: string)
 end
 
 local function findTopbarTitleLabel(topBar: Frame): TextLabel?
+	local cached = (topBar :: any)._cachedTitleLabel :: TextLabel?
+	if cached and cached:IsDescendantOf(topBar) then
+		return cached
+	end
 	for _, instance in topBar:GetDescendants() do
 		if not instance:IsA("TextLabel") then
 			continue
 		end
 		if instance.Name == "Title" or string.find(string.lower(instance.Text), "asset reuploader", 1, true) then
+			(topBar :: any)._cachedTitleLabel = instance
 			return instance
 		end
 	end

@@ -3,11 +3,12 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/kartFr/Asset-Reuploader/internal/app/assets"
+	"github.com/kartFr/Asset-Reuploader/internal/app/config"
 	"github.com/kartFr/Asset-Reuploader/internal/app/request"
 	"github.com/kartFr/Asset-Reuploader/internal/app/response"
 	"github.com/kartFr/Asset-Reuploader/internal/color"
@@ -17,43 +18,81 @@ import (
 
 var CompatiblePluginVersion = ""
 
+const (
+	routeRoot     = "GET /"
+	routeReupload = "POST /reupload"
+)
+
 func getOutputFileName(reuploadType string) string {
 	t := time.Now()
 	return fmt.Sprintf("Output_%s_%s.json", reuploadType, t.Format("2006-01-02_15-04-05"))
 }
 
 func serve(c *roblox.Client) error {
+	var mu sync.Mutex
 	var exportedJSONName string
 	var exportJSON bool
 	var busy bool
 	finished := true
 
 	respHistory := make([]response.ResponseItem, 0)
-	resp := response.New(func(i response.ResponseItem) {
-		if exportJSON {
-			respHistory = append(respHistory, i)
-
-			j, err := json.Marshal(respHistory)
-			if err != nil {
-				log.Fatal(err)
-			}
-
-			if err := files.Write(exportedJSONName, string(j)); err != nil {
-				log.Fatal(err)
-			}
+	isBusy := func() (bool, bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		return busy, finished
+	}
+	setBusy := func(b, f bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		busy, finished = b, f
+	}
+	setExport := func(e bool, name string) {
+		mu.Lock()
+		defer mu.Unlock()
+		exportJSON, exportedJSONName = e, name
+	}
+	appendHistory := func(item response.ResponseItem) {
+		mu.Lock()
+		if !exportJSON {
+			mu.Unlock()
+			return
 		}
+		respHistory = append(respHistory, item)
+		name := exportedJSONName
+		history := append([]response.ResponseItem(nil), respHistory...)
+		j, err := json.Marshal(history)
+		if err != nil {
+			mu.Unlock()
+			color.Error.Println("encode history:", err)
+			return
+		}
+		// Hold lock through file write to keep history file ordered
+		// (writes are per-upload, small JSON, local disk — negligible hold).
+		if err := files.Write(name, string(j)); err != nil {
+			mu.Unlock()
+			color.Error.Println("write history:", err)
+			return
+		}
+		mu.Unlock()
+	}
+	resetHistory := func() {
+		mu.Lock()
+		defer mu.Unlock()
+		respHistory = make([]response.ResponseItem, 0)
+	}
+	resp := response.New(func(i response.ResponseItem) {
+		appendHistory(i)
 	})
 
-	http.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc(routeRoot, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		if resp.Len() == 0 && !busy {
-			if !finished {
-				finished = true
-				busy = false
-				exportJSON = false
-
+		busyNow, finishedNow := isBusy()
+		if resp.Len() == 0 && !busyNow {
+			if !finishedNow {
+				setBusy(false, true)
+				setExport(false, "")
 				resp.Clear()
-				respHistory = make([]response.ResponseItem, 0)
+				resetHistory()
 
 				fmt.Fprint(w, "done")
 				fmt.Println("Finished reuploading. (you can rerun without restarting)")
@@ -63,14 +102,14 @@ func serve(c *roblox.Client) error {
 		}
 
 		if err := resp.EncodeJSON(json.NewEncoder(w)); err != nil {
-			log.Fatal(err)
+			color.Error.Println("encode response:", err)
 		} else {
 			resp.Clear()
 		}
 	})
 
-	http.HandleFunc("POST /reupload", func(w http.ResponseWriter, r *http.Request) {
-		if busy || !finished {
+	http.HandleFunc(routeReupload, func(w http.ResponseWriter, r *http.Request) {
+		if b, f := isBusy(); b || !f {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
@@ -99,19 +138,19 @@ func serve(c *roblox.Client) error {
 			return
 		}
 
-		if exportJSON = req.ExportJSON; exportJSON {
-			exportedJSONName = getOutputFileName(req.AssetType)
+		if req.ExportJSON {
+			setExport(true, getOutputFileName(req.AssetType))
+		} else {
+			setExport(false, "")
 		}
 
-		busy = true
-		finished = false
+		setBusy(true, false)
 
 		go func() {
 			start := time.Now()
 			err := startReupload()
-			busy = false
 			if err != nil {
-				finished = true
+				setBusy(false, true)
 				color.Error.Println("Failed to start reuploading: ", err)
 				return
 			}
@@ -124,5 +163,5 @@ func serve(c *roblox.Client) error {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	return http.ListenAndServe(":"+port, nil)
+	return http.ListenAndServe(":"+config.Get("port"), nil)
 }

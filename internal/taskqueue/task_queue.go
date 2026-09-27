@@ -11,6 +11,15 @@ type TaskResult[R any] struct {
 	Error  error
 }
 
+// Limiter spaces task starts. SmoothQueue (UniformPacer) is canonical for
+// uploads; Queue (fixedWindow) is retained for compat (permission queues).
+// Decrement releases a slot after network errors where applicable.
+type Limiter interface {
+	Wait()
+	Chill(time.Duration)
+	Decrement()
+}
+
 type task[R any] struct {
 	Func func() (R, error)
 	Chan chan TaskResult[R]

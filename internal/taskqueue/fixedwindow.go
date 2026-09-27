@@ -30,12 +30,9 @@ func (w *fixedWindow) Increment() bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	if w.timeRemaining(time.Now()) < 0 {
-		w.start = time.Now()
-		w.requests = max(w.requests-w.limit, 0)
-	}
-
-	if w.requests < 0 {
+	now := time.Now()
+	if now.After(w.start.Add(w.window)) {
+		w.start = now
 		w.requests = 0
 	}
 
@@ -61,13 +58,19 @@ func (w *fixedWindow) Wait() {
 	}
 
 	w.mu.Lock()
-
-	w.requests++
-	nextWindow := (w.requests-1)/w.limit + 1
-	nextWindowTime := w.start.Add(w.window * time.Duration(nextWindow))
-
+	nextWindowTime := w.start.Add(w.window)
 	w.mu.Unlock()
 
-	time.Sleep(w.timeRemaining(nextWindowTime))
-	w.Decrement()
+	if d := time.Until(nextWindowTime); d > 0 {
+		time.Sleep(d)
+	}
+
+	w.mu.Lock()
+	now := time.Now()
+	if now.After(w.start.Add(w.window)) {
+		w.start = now
+		w.requests = 0
+	}
+	w.requests++
+	w.mu.Unlock()
 }

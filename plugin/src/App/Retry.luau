@@ -1,5 +1,6 @@
 --!strict
-return function<A..., R...>(tries: number, func: (A...) -> (R...), ...: A...): (boolean, R...)
+-- Variadic generics (A..., R...) need very new Luau; keep simple ...any for parser compat.
+return function(tries: number, func: (...any) -> ...any, ...: any): (boolean, ...any)
 	local result: any
 	for i=1, tries do
 		result = { pcall(func, ...) }

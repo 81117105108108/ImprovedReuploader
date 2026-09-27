@@ -4,7 +4,9 @@ local Toggle = {}
 local Theme = require("../Theme")
 local Tip = require("../Tip")
 
+-- selene: allow(unused_variable)
 local asset = script.Parent.Parent.Assets.Toggle
+
 
 local function DoToggle(self: Toggle)
     self.state = not self.state

@@ -2,6 +2,7 @@
 local getFilterOptions = require("../GetFilterOptions")
 local reuploadIds = require("../ReuploadIds")
 local UiLibrary = require("../../UiLibrary")
+local GetPlaceList = require("../GetPlaceList")
 
 local Selection = game:GetService("Selection")
 
@@ -12,7 +13,7 @@ return function(ui: UiLibrary.Ui, plugin: Plugin)
         local filter = getFilterOptions(plugin, game:GetDescendants())
         table.insert(filter.WhitelistedInstances, "Sound")
 
-		reuploadIds(plugin, ui, filter, "Sound", _G.getPlaceList()) -- forgive me
+		reuploadIds(plugin, ui, filter, "Sound", GetPlaceList.get()) -- forgive me
 	end)
 	
 	tab:CreateButton("Reupload Selected", function()
@@ -21,7 +22,7 @@ return function(ui: UiLibrary.Ui, plugin: Plugin)
             Instances = Selection:Get()
         }
 
-        reuploadIds(plugin, ui, filter, "Sound", _G.getPlaceList()) -- forgive me
+        reuploadIds(plugin, ui, filter, "Sound", GetPlaceList.get()) -- forgive me
 	end)
 
 

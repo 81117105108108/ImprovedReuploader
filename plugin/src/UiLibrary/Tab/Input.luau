@@ -4,7 +4,9 @@ local Input = {}
 local Theme = require("../Theme")
 local Tip = require("../Tip")
 
+-- selene: allow(unused_variable)
 local asset = script.Parent.Parent.Assets.Input
+
 
 local function AddTip(self: Input, tip: Tip.Tip)
     local textBox = self.instance.TextBox

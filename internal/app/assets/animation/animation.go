@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/kartFr/Asset-Reuploader/internal/app/assets/pipeline"
+	"github.com/kartFr/Asset-Reuploader/internal/app/config"
 	"github.com/kartFr/Asset-Reuploader/internal/app/assets/shared/assetutils"
 	"github.com/kartFr/Asset-Reuploader/internal/app/assets/shared/clientutils"
 	"github.com/kartFr/Asset-Reuploader/internal/app/assets/shared/uploaderror"
@@ -46,30 +48,6 @@ const animationMaxParallelChunks = 6
 
 var ErrUnauthorized = errors.New("authentication required to access asset")
 
-func MoveValueToTop[T comparable](arr *atomicarray.AtomicArray[T], value T) {
-	arr.Update(func(currentArray []T) []T {
-		if currentArray[0] == value {
-			return nil
-		}
-
-		for i, v := range currentArray {
-			if v != value {
-				continue
-			}
-			if i == 1 {
-				currentArray[0], currentArray[1] = currentArray[1], currentArray[0]
-				return currentArray
-			}
-
-			copy(currentArray[1:i+1], currentArray[0:i])
-			currentArray[0] = value
-			return currentArray
-		}
-
-		return nil
-	})
-}
-
 func Reupload(ctx *context.Context, r *request.Request) {
 	client := ctx.Client
 	logger := ctx.Logger
@@ -79,17 +57,7 @@ func Reupload(ctx *context.Context, r *request.Request) {
 	idsToUpload := len(r.IDs)
 	var idsProcessed atomic.Int32
 
-	defaultPlaceIDs := append([]int64(nil), r.DefaultPlaceIDs...)
-	defaultPlaceIDsMap := make(map[int64]struct{}, len(defaultPlaceIDs))
-	for _, placeID := range defaultPlaceIDs {
-		defaultPlaceIDsMap[placeID] = struct{}{}
-	}
-	if r.PlaceID > 0 {
-		if _, exists := defaultPlaceIDsMap[r.PlaceID]; !exists {
-			defaultPlaceIDs = append(defaultPlaceIDs, r.PlaceID)
-			defaultPlaceIDsMap[r.PlaceID] = struct{}{}
-		}
-	}
+	defaultPlaceIDs, defaultPlaceIDsMap := pipeline.GetDefaultPlaceIDs(r)
 
 	var groupID int64
 	if r.IsGroup {
@@ -246,12 +214,8 @@ func Reupload(ctx *context.Context, r *request.Request) {
 	}
 
 	getCreatorPlaceCache := func(creatorID int64, creatorType string) (*atomicarray.AtomicArray[int64], error) {
-		creatorShard, exists := creatorPlaceMap.GetShard(creatorType)
-		mutexShard, _ := creatorMutexMap.GetShard(creatorType)
-		if !exists {
-			creatorShard = creatorPlaceMap.NewShard(creatorType)
-			mutexShard = creatorMutexMap.NewShard(creatorType)
-		}
+		creatorShard := creatorPlaceMap.GetOrCreateShard(creatorType)
+		mutexShard := creatorMutexMap.GetOrCreateShard(creatorType)
 
 		if cache, cacheExists := creatorShard.Get(creatorID); cacheExists {
 			return cache, nil
@@ -265,6 +229,7 @@ func Reupload(ctx *context.Context, r *request.Request) {
 
 		mutex.Lock()
 		defer mutex.Unlock()
+		defer mutexShard.Remove(creatorID)
 
 		if cache, cacheExists := creatorShard.Get(creatorID); cacheExists {
 			return cache, nil
@@ -289,20 +254,19 @@ func Reupload(ctx *context.Context, r *request.Request) {
 			return nil, err
 		}
 
-		ids := make([]int64, 0, len(defaultPlaceIDs)) // we only do len defaultPlaceIds because there may be overlapping, i guess allocating more memory would be fine... idk guys im getting lazy just wait for revamp
-		for _, placeInfo := range resp.Data {         // yes we copying many bytes per iteration, yes i dont care, yes this is another stupid message, yes code iwll get better on revamp :sob:
+			ids := make([]int64, 0, len(defaultPlaceIDs)+len(resp.Data))
+		for _, placeInfo := range resp.Data {
 			rootPlaceID := placeInfo.RootPlace.ID
 
 			if _, exists := defaultPlaceIDsMap[rootPlaceID]; exists {
 				continue
 			}
-			ids = append(ids, rootPlaceID) // we no longer only need 1 valid place id :// ( ͡° ͜ʖ ͡°) yall remember this peak face lmk
+			ids = append(ids, rootPlaceID)
 		}
 		ids = append(ids, defaultPlaceIDs...)
 
 		cache := atomicarray.New(&ids)
 		creatorShard.Set(creatorID, cache)
-		mutexShard.Remove(creatorID)
 		return cache, nil
 	}
 
@@ -422,7 +386,7 @@ func Reupload(ctx *context.Context, r *request.Request) {
 				go uploadAsset(&uploadWG, assetInfoMap[assetID], assetLocation.Locations[0].Location)
 			}
 			if hadSuccess && len(creatorPlaceCache) > 1 {
-				MoveValueToTop(placeCache, placeID)
+				assetutils.MoveValueToTop(placeCache, placeID)
 			}
 			if len(body) == 0 {
 				break
@@ -459,28 +423,10 @@ func Reupload(ctx *context.Context, r *request.Request) {
 			return
 		}
 
-		CreatorAssets := make(map[string]map[int64][]*develop.AssetInfo)
-		for _, assetInfo := range filteredInfo {
-			assetCreatorType := assetInfo.Creator.Type
-			assetCreatorID := assetInfo.Creator.TargetID
-
-			creatorType, exists := CreatorAssets[assetCreatorType]
-			if !exists {
-				creatorType = make(map[int64][]*develop.AssetInfo)
-				CreatorAssets[assetCreatorType] = creatorType
-			}
-
-			creatorAssets, exists := creatorType[assetCreatorID]
-			if !exists {
-				creatorAssets = make([]*develop.AssetInfo, 0)
-				creatorType[assetCreatorID] = creatorAssets
-			}
-
-			creatorType[assetCreatorID] = append(creatorAssets, assetInfo)
-		}
+		creatorAssetsByType := pipeline.GroupByCreator(filteredInfo)
 
 		var uploadWG sync.WaitGroup
-		for creatorType, creatorAssetMap := range CreatorAssets {
+		for creatorType, creatorAssetMap := range creatorAssetsByType {
 			uploadWG.Add(len(creatorAssetMap))
 
 			for creatorID, creatorAssets := range creatorAssetMap {
@@ -493,15 +439,13 @@ func Reupload(ctx *context.Context, r *request.Request) {
 	var wg sync.WaitGroup
 	tasks := assetutils.GetAssetsInfoInChunks(ctx, r)
 	wg.Add(len(tasks))
-	chunkSlots := make(chan struct{}, animationMaxParallelChunks)
+	chunkCap := config.MaxParallelChunks()
+	if chunkCap < 1 {
+		chunkCap = animationMaxParallelChunks
+	}
+	chunkSlots := make(chan struct{}, chunkCap)
 	for i, task := range tasks {
-		batchSize := 50
-		if i == len(tasks)-1 {
-			batchSize = idsToUpload % 50
-			if batchSize == 0 {
-				batchSize = 50
-			}
-		}
+		batchSize := pipeline.CalcBatchSize(idsToUpload, i, len(tasks))
 
 		chunkSlots <- struct{}{}
 		go func(taskCh <-chan assetutils.AssetsInfoResult, bs int) {

@@ -2,3 +2,7 @@ std = "roblox"
 
 [lints]
 multiple_statements="allow"
+# Rojo string require (require("./Module")) — selene roblox std expects Instance; project uses string paths.
+incorrect_standard_library_use="allow"
+# Enum:FromName/FromName-style reflection missing from selene 0.28 std (code guards with pcall/assert); deprecated dock API still valid at runtime.
+deprecated="allow"
